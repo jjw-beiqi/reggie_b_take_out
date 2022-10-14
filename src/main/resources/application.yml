@@ -18,3 +18,10 @@ mybatis-plus:
       id-type: ASSIGN_ID
 reggie:
   path: /Users/jiangjinwei/Downloads/reggieImg/
+mythreadpool:
+  maxPoolSize: 20
+  corePoolSize: 8
+  queueCapacity: 2048
+  keepAliveSeconds: 60
+  threadNamePrefix: springThreadPool
+  waitForTasksToCompleteOnShutdown: true

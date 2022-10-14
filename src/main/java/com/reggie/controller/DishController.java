@@ -6,15 +6,19 @@ import com.reggie.common.R;
 import com.reggie.dto.DishDto;
 import com.reggie.entity.Category;
 import com.reggie.entity.Dish;
+import com.reggie.entity.DishFlavor;
 import com.reggie.service.CategoryService;
 import com.reggie.service.DishFlavorService;
 import com.reggie.service.DishService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 @RestController
@@ -30,6 +34,11 @@ public class DishController {
     @Autowired
     private CategoryService categoryService;
 
+    @Autowired
+    private RedisTemplate redisTemplate;
+
+    @Autowired
+    private Executor taskExecutor;
     /**
      * 新增菜品
      * @param dishDto
@@ -37,7 +46,27 @@ public class DishController {
      */
     @PostMapping
     public R<String> save(@RequestBody DishDto dishDto){
+        // 构造 redis 中的key
+        String key = "dish_"+ dishDto.getCategoryId() + "_1";
+        // 清理缓存数据
+        redisTemplate.delete(key);
+
         dishService.saveWithFlavor(dishDto);
+
+        // 采用延迟双删策略，保证数据的一致性
+        taskExecutor.execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Thread.sleep(500);
+                    // 清理缓存数据
+                    redisTemplate.delete(key);
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+            }
+        });
+
         return R.success("新增菜品成功！");
     }
 
@@ -115,7 +144,26 @@ public class DishController {
      */
     @PutMapping
     public R<String> update(@RequestBody DishDto dishDto){
+        // 构造 redis 中的key
+        String key = "dish_"+ dishDto.getCategoryId() + "_1";
+        // 清理缓存数据
+        redisTemplate.delete(key);
+
         dishService.updateWithFlavor(dishDto);
+
+        // 采用延迟双删策略，保证数据的一致性
+        taskExecutor.execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Thread.sleep(500);
+                    // 清理缓存数据
+                    redisTemplate.delete(key);
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+            }
+        });
 
         return R.success("更新菜品信息成功！");
     }
@@ -139,7 +187,19 @@ public class DishController {
      * @return
      */
     @GetMapping("/list")
-    public R<List<Dish>> list(Dish dish){
+    public R<List<DishDto>> list(Dish dish){
+        List<DishDto> dishDtoList = null;
+
+        String key = "dish_" + dish.getCategoryId() + "_" + dish.getStatus();
+        // 先从redis中获取缓存数据
+        dishDtoList = (List<DishDto>)redisTemplate.opsForValue().get(key);
+
+        if (dishDtoList!=null){
+            // 如果存在，直接返回，无需查询数据库
+            return R.success(dishDtoList);
+        }
+
+        // 如果不存在，需要查询数据库，将查询到的菜品数据缓存到redis
         //构造查询条件
         LambdaQueryWrapper<Dish> queryWrapper = new LambdaQueryWrapper<>();
 
@@ -150,6 +210,32 @@ public class DishController {
 
         List<Dish> list = dishService.list(queryWrapper);
 
-        return R.success(list);
+        dishDtoList = list.stream().map(record ->{
+            DishDto dishDto = new DishDto();
+
+            // 拷贝所有属性
+            BeanUtils.copyProperties(record,dishDto);
+
+            // 根据菜品id查询菜品
+            Long categoryId = record.getCategoryId();
+            Category category = categoryService.getById(categoryId);
+
+            // 获取分类名称，并给 dishDto 设置菜品分类名称
+            if (category!=null){
+                String categoryName = category.getName();
+                dishDto.setCategoryName(categoryName);
+            }
+
+            Long dishId = record.getId();
+            LambdaQueryWrapper<DishFlavor> queryWrapper1 = new LambdaQueryWrapper<>();
+            queryWrapper1.eq(DishFlavor::getDishId,dishId);
+            List<DishFlavor> dishFlavors = dishFlavorService.list(queryWrapper1);
+            dishDto.setFlavors(dishFlavors);
+
+            return dishDto;
+        }).collect(Collectors.toList());
+
+        redisTemplate.opsForValue().set(key,dishDtoList,60, TimeUnit.MINUTES);
+        return R.success(dishDtoList);
     }
 }
